@@ -8,8 +8,9 @@ import matplotlib.pyplot as plt
 import cv2
 from scipy import spatial
 
-
+# main clas for processing a plank through mediapipe and analyzing results
 class ProcessPlank:
+    # init object with a mp_pose instance, a pretrained plank model, and the input video filename
     def __init__(self, mp_pose, model, input_filename):
         
         self.mp_pose = mp_pose
@@ -20,8 +21,8 @@ class ProcessPlank:
         self.feat_df = None
         self.y_hat = None
         
-        
         # globals
+        # create dictionary of the landmarks we care about in planks (for each side)
         self.left_features = {
             'shoulder': self.mp_pose.PoseLandmark.LEFT_SHOULDER.value,  # 11
             'elbow'   : self.mp_pose.PoseLandmark.LEFT_ELBOW.value,     # 13
@@ -64,7 +65,9 @@ class ProcessPlank:
             'light_blue' : (255, 204, 102)
         }
 
+        
     # mediapipe processing code
+    # process a frame from a video 
     def process_frame(self,frame,pose,frame_num,videowriter=None,saveframe=False,output_filename="output.jpg"):
         frame_height, frame_width, _ = frame.shape
 
@@ -73,6 +76,7 @@ class ProcessPlank:
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         frame.flags.writeable = False
 
+        # process frame through mediapipe's main process function and get the keypoints
         keypoints = pose.process(frame)
 
         # recolor back to BGR
@@ -81,6 +85,7 @@ class ProcessPlank:
 
         crit_angles_list = [0,0,0,0]
 
+        # if keypoints were found, extract landmark coordinates and compute critical angles
         if keypoints.pose_landmarks:
             ps_lm = keypoints.pose_landmarks
 
@@ -95,11 +100,7 @@ class ProcessPlank:
             offset_angle = find_angle(left_shldr_coord, right_shldr_coord, nose_coord)   
 
             camera_view = 'right'
-            #
-            # ASSUME camera angle is from the right for now
-            #   
-
-            # determine camera view (left or right) - front will default to right for now (TODO: handle this better)
+            # determine camera view (left or right) - front will default to right for now
             if offset_angle > 35.0:
                 # hard-coded for now - determined from squat code author, seems good
                 camera_view = 'front'
@@ -217,8 +218,11 @@ class ProcessPlank:
             # save frame angles for later analyses
             crit_angles_list = [shoulder_vertical_angle, hip_vertical_angle, knee_vertical_angle, ankle_vertical_angle]
         
+        # return keypoint results and critical angles
         return keypoints, crit_angles_list
 
+    
+    # process a whole video and store results
     def process_video(self,output_filename="output.mp4"):
         with self.mp_pose.Pose(static_image_mode=False,min_detection_confidence=0.5,min_tracking_confidence=0.5,model_complexity=1,smooth_landmarks=True) as pose:
             # Create VideoCapture object
@@ -241,7 +245,7 @@ class ProcessPlank:
             # videowriter = cv2.VideoWriter(output_filename,cv2.VideoWriter_fourcc(*'MJPG'),fps,size) # saves as .avi
 
 
-            # Create a NumPy array to store the pose data as before
+            # Create a NumPy array to store the pose data 
             # The shape is lengthx33x3 - 3D XYZ data for 33 landmarks across 'length' number of frames
             data = np.empty((length, 33, 3))
             angles_data = np.empty((length, 4)) 
@@ -256,10 +260,12 @@ class ProcessPlank:
                 # process current frame and get list of pose estimation results and list of critical angles
                 results, angles_list = self.process_frame(frame,pose,frame_num,videowriter)
 
+                # save landmark coordinates for this frame
                 landmarks = results.pose_world_landmarks.landmark
                 for i in range(len(self.mp_pose.PoseLandmark)):
                     data[frame_num, i, :] = (landmarks[i].x, landmarks[i].y, landmarks[i].z)
 
+                # save the critical angles for this frame
                 for i in range(len(angles_list)):
                     angles_data[frame_num,i] = angles_list[i]
 
@@ -268,14 +274,17 @@ class ProcessPlank:
             cap.release()
             videowriter.release()
             cv2.destroyAllWindows()
-            print("The video was successfully processed")
+            print("The video was successfully processed as: "+output_filename)
 
+        # save pose estimation landmark coordinates and computed critical angles data
         self.data = data
         self.angles_data = angles_data
+        # analyze plank data to find when in/out plank
         self.analyze_plank()
-        # return data, angles_data
 
-    def process_video_for_meanframe(self,mean_framenum,output_filename="meanframe.jpg"):
+        
+    # process a video but only process and save the mean frame
+    def process_video_for_meanframe(self,mean_framenum,output_filename="average_plank.jpg"):
         with self.mp_pose.Pose(static_image_mode=True,min_detection_confidence=0.5,min_tracking_confidence=0.5,model_complexity=1,smooth_landmarks=True) as pose:
             # Create VideoCapture object
             cap = cv2.VideoCapture(self.input_filename)
@@ -302,43 +311,48 @@ class ProcessPlank:
             cv2.destroyAllWindows()
             print("The mean frame was successfully processed as: "+output_filename)
 
+    # create a feature matrix df from saved plank data and use pretrained model to predict frames when in/out of plank
     def analyze_plank(self):
         # run through trained model
         feat_df = make_default_feature_matrix(self.data, self.angles_data)
         X = feat_df.drop(0,axis=1) # features
         # predict when in (1) or out (0) of a plank
         y_hat = self.model.predict(X)
-
+        # save feature matrix df and model predictions
         self.feat_df = feat_df
         self.y_hat = y_hat
-        # return feat_df, y_hat
-
+           
+    # plot the "in plank" critical angles over time
     def display_critical_angles(self):
-        # plot the "in plank" critical angles over time
         plot_crit_angles(self.angles_data[self.y_hat == 1])
 
-    def display_average_plank(self, output_filename="meanframe.jpg"):
+    # compute and process average plank
+    def display_average_plank(self, output_filename="average_plank.jpg"):
+        # compute mean vector over features of frames in plank
         mean_features = np.array(self.feat_df[self.y_hat == 1].mean())
+        # search for nearest frame to mean_features with a KDTree
         feat_matrix = np.array(self.feat_df)
         tree = spatial.KDTree(feat_matrix)
         mean_framenum = tree.query(mean_features)[1]
+        # process just this frame and save it
         self.process_video_for_meanframe(mean_framenum,output_filename)
 
 
+# some useful helper functions
 
-
-# some useful functions
+# get angle between 2 points
 def find_angle(p1, p2, ref_pt = np.array([0,0])):
     p1_ref = p1 - ref_pt
     p2_ref = p2 - ref_pt
 
     cos_theta = (np.dot(p1_ref,p2_ref)) / (1.0 * np.linalg.norm(p1_ref) * np.linalg.norm(p2_ref))
     theta = np.arccos(np.clip(cos_theta, -1.0, 1.0))
-    # note degree will always be less than 180 -- pretty sure...      
+    # note degree will always be less than 180      
     degree = int(180 / np.pi) * theta
 
     return int(degree)
 
+# get actual landmark coordinates given frame size
 def get_landmark_array(pose_landmark, key, frame_width, frame_height):
 
     denorm_x = int(pose_landmark[key].x * frame_width)
@@ -346,6 +360,7 @@ def get_landmark_array(pose_landmark, key, frame_width, frame_height):
 
     return np.array([denorm_x, denorm_y])
 
+# return coordinates for landmarks useful for planks (for one side only)
 def get_landmark_features(kp_results, dict_features, feature, frame_width, frame_height):
 
     if feature == 'nose':
@@ -364,7 +379,8 @@ def get_landmark_features(kp_results, dict_features, feature, frame_width, frame
     
     else:
        raise ValueError("feature needs to be either 'nose', 'left' or 'right")
-    
+
+# draws a dotted vertical line
 def draw_dotted_line(frame, lm_coord, start, end, line_color):
     pix_step = 0
 
@@ -372,7 +388,6 @@ def draw_dotted_line(frame, lm_coord, start, end, line_color):
         cv2.circle(frame, (lm_coord[0], i+pix_step), 2, line_color, -1, lineType=cv2.LINE_AA)
 
     return frame
-
 
 # places a 1 class in 0th column for every row
 def make_default_feature_matrix(data, angles_data):
@@ -385,12 +400,13 @@ def make_default_feature_matrix(data, angles_data):
     
     return features_df
 
+# plot the angles data over time (in frames)
 def plot_crit_angles(angles_data):
-    col_names = ['shoulder', 'hip', 'knee', 'ankle']
+    col_names = ['Shoulder', 'Hip', 'Knee', 'Ankle']
     df = pd.DataFrame(data=angles_data,columns=col_names)
     df.plot(figsize=(10,4))
-    plt.title('plank angles over time')
-    plt.xlabel('time')
-    plt.ylabel('angle')
+    plt.title('Plank angles over time')
+    plt.xlabel('Time (frames)')
+    plt.ylabel('Angle (degrees)')
     plt.legend(bbox_to_anchor=(1.05, 1.0), loc='upper left')
     plt.tight_layout()
